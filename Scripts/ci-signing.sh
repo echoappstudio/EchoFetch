@@ -51,7 +51,7 @@ KEYCHAIN_PASSWORD="$(head -c 24 /dev/urandom | base64)"
 echo "::add-mask::$KEYCHAIN_PASSWORD"
 security delete-keychain "$KEYCHAIN" >/dev/null 2>&1 || true
 security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-security set-keychain-settings -lut 3600 "$KEYCHAIN"
+security set-keychain-settings "$KEYCHAIN"
 security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
 security import "$P12_PATH" -k "$KEYCHAIN" -P "$P12_PASSWORD" -f pkcs12 -T /usr/bin/codesign >/dev/null
 rm -f "$P12_PATH"

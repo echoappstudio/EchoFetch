@@ -9,6 +9,7 @@ enum Preferences {
     static let audioFormatKey = "EchoFetch.audioFormat"
     static let fillInCopiedLinksKey = "EchoFetch.fillInCopiedLinks"
     static let lastEngineCheckKey = "EchoFetch.lastEngineCheck"
+    static let videoQualityKey = "EchoFetch.videoQuality"
 
     static var defaultSaveFolder: URL {
         FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
@@ -23,6 +24,11 @@ enum Preferences {
 
     static var audioFormat: AudioFormat {
         AudioFormat(rawValue: UserDefaults.standard.string(forKey: audioFormatKey) ?? "") ?? .m4a
+    }
+
+    /// Original until a compressed choice is made; the last choice is remembered.
+    static var videoQuality: VideoQuality {
+        VideoQuality.saved(UserDefaults.standard.string(forKey: videoQualityKey))
     }
 
     static var fillInCopiedLinks: Bool {

@@ -16,6 +16,13 @@ public struct DownloadRecord: Codable, Equatable, Identifiable, Sendable {
     public var itemCount: Int
     public var byteCount: Int64
     public var createdAt: Date
+    /// The part that was saved, when it wasn't the whole video. Missing in records from before 0.4.0.
+    public var clip: ClipRange?
+    /// `VideoQuality`'s raw value for compressed videos ("apple-hevc", "x265"); nil for originals
+    /// and audio. Kept as text so an unknown value never stops the history loading.
+    public var videoQuality: String?
+    /// The size yt-dlp downloaded before compressing.
+    public var originalByteCount: Int64?
 
     public init(
         id: UUID = UUID(),
@@ -29,7 +36,10 @@ public struct DownloadRecord: Codable, Equatable, Identifiable, Sendable {
         isFolder: Bool,
         itemCount: Int,
         byteCount: Int64,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        clip: ClipRange? = nil,
+        videoQuality: String? = nil,
+        originalByteCount: Int64? = nil
     ) {
         self.id = id
         self.title = title
@@ -43,6 +53,14 @@ public struct DownloadRecord: Codable, Equatable, Identifiable, Sendable {
         self.itemCount = itemCount
         self.byteCount = byteCount
         self.createdAt = createdAt
+        self.clip = clip
+        self.videoQuality = videoQuality
+        self.originalByteCount = originalByteCount
+    }
+
+    /// The compression used, when it's one this version knows.
+    public var compression: VideoQuality? {
+        videoQuality.flatMap(VideoQuality.init(rawValue:)).flatMap { $0.isCompressed ? $0 : nil }
     }
 }
 

@@ -1,7 +1,24 @@
 import Foundation
 
+/// A stream EchoFetch's player can show while you choose a part: H.264 or HEVC with sound, as one
+/// file or an HLS playlist.
+public struct PreviewStream: Equatable, Sendable {
+    public var url: URL
+    /// Headers the site expects, such as its User-Agent.
+    public var headers: [String: String]
+    public var height: Int?
+    public var isHLS: Bool
+
+    public init(url: URL, headers: [String: String] = [:], height: Int? = nil, isHLS: Bool = false) {
+        self.url = url
+        self.headers = headers
+        self.height = height
+        self.isHLS = isHLS
+    }
+}
+
 /// One video (or audio track) found at a link.
-public struct MediaItem: Equatable, Sendable {
+public struct MediaItem: Equatable, Identifiable, Sendable {
     public var id: String
     public var title: String
     public var uploader: String?
@@ -14,6 +31,8 @@ public struct MediaItem: Equatable, Sendable {
     public var isLiveOrUpcoming: Bool
     /// False for private, deleted or members-only entries in a playlist.
     public var isAvailable: Bool
+    /// What the player shows while choosing a part. Nil when the site offers nothing it can play.
+    public var previewStream: PreviewStream?
 
     public init(
         id: String,
@@ -24,7 +43,8 @@ public struct MediaItem: Equatable, Sendable {
         webpageURL: URL? = nil,
         siteName: String? = nil,
         isLiveOrUpcoming: Bool = false,
-        isAvailable: Bool = true
+        isAvailable: Bool = true,
+        previewStream: PreviewStream? = nil
     ) {
         self.id = id
         self.title = title
@@ -35,6 +55,7 @@ public struct MediaItem: Equatable, Sendable {
         self.siteName = siteName
         self.isLiveOrUpcoming = isLiveOrUpcoming
         self.isAvailable = isAvailable
+        self.previewStream = previewStream
     }
 }
 
@@ -110,7 +131,9 @@ public enum MediaInfoParser {
                 entries: entries
             ))
         }
-        return .single(item(from: root, fallbackSite: nil))
+        var single = item(from: root, fallbackSite: nil)
+        single.previewStream = previewStream(from: root)
+        return .single(single)
     }
 
     static func item(from dictionary: [String: Any], fallbackSite: String?) -> MediaItem {
@@ -132,6 +155,65 @@ public enum MediaInfoParser {
             isLiveOrUpcoming: isLive,
             isAvailable: isAvailable
         )
+    }
+
+    /// The best stream for the player: H.264 or HEVC with sound, around 720p, HLS before a single
+    /// file of the same height. A direct link to an MP4 (codecs unknown) is used when nothing better is
+    /// listed. VP9 and AV1 are skipped: the player can't count on them.
+    static func previewStream(from dictionary: [String: Any]) -> PreviewStream? {
+        var formats = (dictionary["formats"] as? [Any] ?? []).compactMap { $0 as? [String: Any] }
+        if formats.isEmpty, dictionary["url"] != nil { formats = [dictionary] }
+        let sharedHeaders = headers(dictionary["http_headers"])
+
+        struct Candidate {
+            let stream: PreviewStream
+            let knownCodecs: Bool
+        }
+        let candidates = formats.compactMap { format -> Candidate? in
+            guard let text = string(format["url"]), let url = URL(string: text),
+                  let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http" else { return nil }
+            let streamProtocol = (string(format["protocol"]) ?? scheme).lowercased()
+            let isHLS = streamProtocol == "m3u8" || streamProtocol == "m3u8_native"
+            guard isHLS || streamProtocol == "https" || streamProtocol == "http" else { return nil }
+            if (format["has_drm"] as? NSNumber)?.boolValue == true { return nil }
+            let video = string(format["vcodec"])?.lowercased()
+            let audio = string(format["acodec"])?.lowercased()
+            if video == "none" || audio == "none" { return nil }
+            let playableVideo = ["avc1", "avc3", "h264", "hvc1", "hev1", "h265"]
+            if let video, !playableVideo.contains(where: { video.hasPrefix($0) }) { return nil }
+            if let audio, !["mp4a", "aac", "mp3", "ac-3", "ec-3"].contains(where: { audio.hasPrefix($0) }) { return nil }
+            let ext = (string(format["ext"]) ?? url.pathExtension).lowercased()
+            if !isHLS, !["mp4", "m4v", "mov"].contains(ext) { return nil }
+            let height = number(format["height"]).map { Int($0) }
+            let formatHeaders = headers(format["http_headers"])
+            return Candidate(
+                stream: PreviewStream(url: url, headers: formatHeaders.isEmpty ? sharedHeaders : formatHeaders, height: height, isHLS: isHLS),
+                knownCodecs: video != nil
+            )
+        }
+        let best = candidates.max { lhs, rhs in
+            previewRank(lhs.stream, knownCodecs: lhs.knownCodecs)
+                .lexicographicallyPrecedes(previewRank(rhs.stream, knownCodecs: rhs.knownCodecs))
+        }
+        return best?.stream
+    }
+
+    /// Higher is better: known codecs, then 720p or just under, then HLS.
+    static func previewRank(_ stream: PreviewStream, knownCodecs: Bool) -> [Int] {
+        let height = stream.height ?? 0
+        let fits = height > 0 && height <= 720
+        // Under 720: taller is better. Over 720: closer to 720 is better. Unknown heights come last.
+        let closeness = height == 0 ? -100_000 : (fits ? height : 720 - height)
+        return [knownCodecs ? 1 : 0, closeness, stream.isHLS ? 1 : 0]
+    }
+
+    static func headers(_ value: Any?) -> [String: String] {
+        guard let dictionary = value as? [String: Any] else { return [:] }
+        var result: [String: String] = [:]
+        for (key, value) in dictionary {
+            if let text = value as? String { result[key] = text }
+        }
+        return result
     }
 
     /// The "thumbnail" field, otherwise the widest entry in "thumbnails" (the last one when no

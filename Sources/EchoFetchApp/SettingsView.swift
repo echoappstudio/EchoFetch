@@ -7,6 +7,7 @@ struct SettingsView: View {
     @AppStorage(Preferences.saveFolderKey) private var saveFolderPath = ""
     @AppStorage(Preferences.audioFormatKey) private var audioFormat = AudioFormat.m4a.rawValue
     @AppStorage(Preferences.fillInCopiedLinksKey) private var fillInCopiedLinks = true
+    @AppStorage(Preferences.videoQualityKey) private var videoQuality = VideoQuality.original.rawValue
 
     private var tools: ToolsController { runtime.tools }
     private var updates: UpdateController { runtime.updates }
@@ -105,7 +106,17 @@ struct SettingsView: View {
 
                 Divider()
 
+                Picker("Video quality", selection: $videoQuality) {
+                    ForEach(VideoQuality.allCases, id: \.self) { quality in
+                        Text(quality.title).tag(quality.rawValue)
+                    }
+                }
+                .fixedSize()
                 Label(videoNote, systemImage: "film")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Smaller and Smallest download the best quality, then compress it to HEVC, which QuickTime plays. Apple HEVC uses your Mac's video encoder and is fast. x265 makes the smallest files at good quality but takes longer. Only the compressed copy is kept. The Download tab has the same choice.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -117,8 +128,8 @@ struct SettingsView: View {
 
     private var videoNote: String {
         VideoSupport.playsAV1
-            ? "Video is saved as MP4 in the best quality QuickTime plays on this Mac, up to 4K and 8K (AV1 or H.264)."
-            : "Video is saved as MP4 in the best quality QuickTime plays on this Mac (H.264, up to 1080p on YouTube)."
+            ? "Original video is saved as MP4 in the best quality QuickTime plays on this Mac, up to 4K and 8K (AV1 or H.264)."
+            : "Original video is saved as MP4 in the best quality QuickTime plays on this Mac (H.264, up to 1080p on YouTube)."
     }
 
     // MARK: Links
@@ -275,7 +286,7 @@ struct SettingsView: View {
     private var includedTools: String {
         let ffmpeg = tools.version(of: "ffmpeg") ?? "—"
         let deno = tools.version(of: "deno") ?? "—"
-        return "Also included: ffmpeg \(ffmpeg) for joining video and audio and converting to MP3, and Deno \(deno), which YouTube needs."
+        return "Also included: ffmpeg \(ffmpeg) for joining video and audio, saving parts, compressing to HEVC and converting to MP3, and Deno \(deno), which YouTube needs."
     }
 
     private var lastCheckText: String {
