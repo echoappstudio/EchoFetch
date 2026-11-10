@@ -7,6 +7,8 @@ struct DownloadView: View {
     @AppStorage(Preferences.saveFolderKey) private var saveFolderPath = ""
     @AppStorage(Preferences.audioFormatKey) private var audioFormat = AudioFormat.m4a.rawValue
     @AppStorage(Preferences.fillInCopiedLinksKey) private var fillInCopiedLinks = true
+    @AppStorage(Preferences.videoQualityKey) private var videoQuality = VideoQuality.original.rawValue
+    @State private var choosingPart: MediaItem?
 
     private var downloads: DownloadController { runtime.downloads }
     private var tools: ToolsController { runtime.tools }
@@ -39,6 +41,11 @@ struct DownloadView: View {
         .onChange(of: downloads.linkText) { _, _ in
             downloads.linkTextChanged()
         }
+        .sheet(item: $choosingPart) { item in
+            PartSheet(item: item, initialClip: downloads.clip) { chosen in
+                downloads.setClip(chosen, for: item)
+            }
+        }
         .frame(minWidth: 760, minHeight: 580)
     }
 
@@ -48,6 +55,10 @@ struct DownloadView: View {
 
     private var chosenAudioFormat: AudioFormat {
         AudioFormat(rawValue: audioFormat) ?? .m4a
+    }
+
+    private var chosenVideoQuality: VideoQuality {
+        VideoQuality.saved(videoQuality)
     }
 
     private var linkBinding: Binding<String> {
@@ -185,7 +196,9 @@ struct DownloadView: View {
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     } else {
-                        downloadButtons(video: "Download Video", audio: "Download Audio")
+                        partRow(item)
+                        qualityPicker
+                        downloadButtons(video: downloads.clip == nil ? "Download Video" : "Download Part", audio: "Download Audio")
                         Text(formatNote)
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -218,6 +231,7 @@ struct DownloadView: View {
                         Text(subtitle)
                             .foregroundStyle(.secondary)
                         Spacer(minLength: 12)
+                        qualityPicker
                         downloadButtons(video: videoTitle, audio: audioTitle)
                         Text("Saved one at a time into a folder named after the playlist. Videos that can't be downloaded are skipped.")
                             .font(.caption)
@@ -261,6 +275,34 @@ struct DownloadView: View {
         }
     }
 
+    /// "Whole video · Choose Part…", or the chosen part with Change… and Whole Video.
+    private func partRow(_ item: MediaItem) -> some View {
+        let clip = downloads.clip
+        let label: String = clip.map { "Part: \($0.displayText) (\(ClipTime.text($0.length)))" } ?? "Whole video"
+        return HStack(spacing: 10) {
+            Label(label, systemImage: clip == nil ? "film" : "scissors")
+                .foregroundStyle(clip == nil ? HierarchicalShapeStyle.secondary : HierarchicalShapeStyle.primary)
+                .monospacedDigit()
+            Button(clip == nil ? "Choose Part…" : "Change…") {
+                choosingPart = item
+            }
+            if clip != nil {
+                Button("Whole Video") { downloads.setClip(nil, for: item) }
+            }
+        }
+        .disabled(downloads.isDownloading)
+    }
+
+    private var qualityPicker: some View {
+        Picker("Video quality", selection: $videoQuality) {
+            ForEach(VideoQuality.allCases, id: \.self) { quality in
+                Text(quality.title).tag(quality.rawValue)
+            }
+        }
+        .fixedSize()
+        .disabled(downloads.isDownloading)
+    }
+
     private func downloadButtons(video: String, audio: String) -> some View {
         HStack(spacing: 10) {
             Button {
@@ -286,9 +328,17 @@ struct DownloadView: View {
     }
 
     private var formatNote: String {
-        let video = VideoSupport.playsAV1
-            ? "Video: MP4 in the best quality QuickTime plays, up to 4K and 8K."
-            : "Video: MP4 in the best quality QuickTime plays on this Mac (up to 1080p)."
+        let video: String
+        switch chosenVideoQuality {
+        case .original:
+            video = VideoSupport.playsAV1
+                ? "Video: MP4 in the best quality QuickTime plays, up to 4K and 8K."
+                : "Video: MP4 in the best quality QuickTime plays on this Mac (up to 1080p)."
+        case .appleHEVC:
+            video = "Video: the best quality, compressed to HEVC by your Mac. Fast, and smaller than the original."
+        case .x265:
+            video = "Video: the best quality, compressed with x265 for the smallest file. Slower: a long 4K video can take a while."
+        }
         let audio = chosenAudioFormat == .m4a ? "Audio: M4A, original quality." : "Audio: MP3."
         return "\(video) \(audio)"
     }
@@ -341,7 +391,9 @@ struct DownloadView: View {
                 Spacer()
                 Button("Cancel") { downloads.cancelDownload() }
             }
-            if job.progress.phase == .downloading, let fraction = job.progress.fraction {
+            if let compression = job.compression, let fraction = compression.fraction {
+                ProgressView(value: fraction)
+            } else if job.compression == nil, job.progress.phase == .downloading, let fraction = job.progress.fraction {
                 ProgressView(value: fraction)
             } else {
                 ProgressView()
@@ -351,7 +403,7 @@ struct DownloadView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
-            if job.isPlaylist, let overall = job.progress.playlistFraction {
+            if job.isPlaylist, job.compression == nil, let overall = job.progress.playlistFraction {
                 Divider()
                 HStack {
                     Text(playlistPosition(job))
@@ -375,10 +427,16 @@ struct DownloadView: View {
     }
 
     private func statusTitle(_ job: DownloadController.Job) -> String {
+        if let compression = job.compression {
+            return compression.quality == .x265 ? "Compressing with x265…" : "Compressing with Apple HEVC…"
+        }
         switch job.progress.phase {
         case .starting:
             return "Starting…"
         case .downloading:
+            if job.clip != nil {
+                return job.kind == .video ? "Downloading the part…" : "Downloading the part's audio…"
+            }
             if job.kind == .video {
                 return job.progress.isAudioPart ? "Downloading the audio…" : "Downloading the video…"
             }
@@ -390,6 +448,13 @@ struct DownloadView: View {
     }
 
     private func detailLine(_ job: DownloadController.Job) -> String {
+        if let compression = job.compression {
+            var parts: [String] = []
+            if let fraction = compression.fraction { parts.append(DisplayFormat.percent(fraction)) }
+            if compression.count > 1 { parts.append("Video \(compression.index) of \(compression.count)") }
+            parts.append("Only the compressed copy is saved.")
+            return parts.joined(separator: " · ")
+        }
         switch job.progress.phase {
         case .starting:
             return "Getting ready to download."
@@ -408,7 +473,13 @@ struct DownloadView: View {
             ? "Saved \(finished.savedCount) of \(count(finished.totalItems, "video")) from “\(record.title)”"
             : "Saved “\(record.title)”"
         let place: String = record.isFolder ? url.lastPathComponent : Preferences.folderDisplayName(url.deletingLastPathComponent())
-        let summary = details([record.fileExtension.uppercased(), DisplayFormat.bytes(record.byteCount), "in \(place)"])
+        let compressed: String? = record.compression.map { quality in
+            let codec = quality == .x265 ? "x265" : "Apple HEVC"
+            guard let original = record.originalByteCount, original > 0 else { return codec }
+            return "\(codec), down from \(DisplayFormat.bytes(original))"
+        }
+        let part: String? = record.clip.map { "part \($0.displayText)" }
+        let summary = details([record.fileExtension.uppercased(), part, DisplayFormat.bytes(record.byteCount), compressed, "in \(place)"])
         let problem = "\(count(finished.failedCount, "video")) couldn't be downloaded. \(finished.problem ?? "")"
         return VStack(alignment: .leading, spacing: 10) {
             Label {

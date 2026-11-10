@@ -14,13 +14,23 @@ final class DownloadController {
         case failed(String)
     }
 
+    /// Compressing the downloaded videos, one at a time.
+    struct Compression: Equatable {
+        let quality: VideoQuality
+        var index: Int
+        let count: Int
+        var fraction: Double?
+    }
+
     struct Job: Equatable {
         let kind: DownloadKind
         let audioFormat: AudioFormat
         let title: String
         let isPlaylist: Bool
         let totalItems: Int
-        var progress = DownloadProgressState()
+        let clip: ClipRange?
+        var progress: DownloadProgressState
+        var compression: Compression?
     }
 
     struct Finished: Equatable {
@@ -48,6 +58,8 @@ final class DownloadController {
     /// Set when the link is a YouTube video opened from a playlist.
     private(set) var playlistOffer: String?
     private(set) var lastKind: DownloadKind?
+    /// The part of the previewed video to download; nil downloads all of it.
+    private(set) var clip: ClipRange?
 
     private let tools: ToolsController
     private let history: HistoryController
@@ -56,6 +68,7 @@ final class DownloadController {
     private var previewGeneration = 0
     private var previewProcess: ToolProcess?
     private var downloadProcess: ToolProcess?
+    private var compressor: VideoCompressor?
     private var lookupDelay: Task<Void, Never>?
     private var lastPasteboardChangeCount = -1
     private var lastFilledLink: String?
@@ -73,6 +86,31 @@ final class DownloadController {
     var canDownload: Bool {
         guard case .loaded = preview else { return false }
         return !isDownloading && tools.setupState == .ready
+    }
+
+    /// The previewed video when the link is a single video (parts can't be chosen for playlists).
+    var previewedVideo: MediaItem? {
+        if case .loaded(.single(let item)) = preview { return item }
+        return nil
+    }
+
+    // MARK: Part
+
+    /// Sets the part of `video` to download. A part covering the whole video, or none, downloads
+    /// everything. Ignored when the link has changed since the part was chosen.
+    func setClip(_ newClip: ClipRange?, for video: MediaItem) {
+        guard !isDownloading, let item = previewedVideo, item.id == video.id, item.webpageURL == video.webpageURL else { return }
+        guard var adjusted = newClip else {
+            clip = nil
+            return
+        }
+        // The player's length can be a moment longer than the one the site reported.
+        if let length = item.duration, length > 0 { adjusted.end = min(adjusted.end, length) }
+        guard adjusted.isValid(videoLength: item.duration), !adjusted.coversWholeVideo(videoLength: item.duration) else {
+            clip = nil
+            return
+        }
+        clip = adjusted
     }
 
     // MARK: Link
@@ -114,6 +152,7 @@ final class DownloadController {
         }
 
         cancelPreview()
+        clip = nil
         previewGeneration += 1
         let generation = previewGeneration
         previewedLink = link
@@ -144,6 +183,7 @@ final class DownloadController {
         cancelPreview()
         linkText = ""
         lastFilledLink = nil
+        clip = nil
         preview = .empty
         playlistOffer = nil
     }
@@ -205,18 +245,36 @@ final class DownloadController {
 
     func download(_ kind: DownloadKind) {
         guard !isDownloading, case .loaded(let info) = preview, let link = previewedLink else { return }
-        let request: DownloadRequest
         let totalItems: Int
+        let isPlaylist: Bool
         switch info {
         case .single:
             totalItems = 1
-            request = DownloadRequest(link: link, kind: kind, audioFormat: Preferences.audioFormat, isPlaylist: false, allowsAV1: VideoSupport.playsAV1)
+            isPlaylist = false
         case .playlist(let playlist):
             totalItems = playlist.entries.count
-            request = DownloadRequest(link: link, kind: kind, audioFormat: Preferences.audioFormat, isPlaylist: true, allowsAV1: VideoSupport.playsAV1)
+            isPlaylist = true
         }
+        let request = DownloadRequest(
+            link: link,
+            kind: kind,
+            audioFormat: Preferences.audioFormat,
+            isPlaylist: isPlaylist,
+            allowsAV1: VideoSupport.playsAV1,
+            clip: isPlaylist ? nil : clip,
+            videoQuality: kind == .video ? Preferences.videoQuality : .original
+        )
         lastKind = kind
-        job = .running(Job(kind: kind, audioFormat: request.audioFormat, title: info.title, isPlaylist: request.isPlaylist, totalItems: totalItems))
+        job = .running(Job(
+            kind: kind,
+            audioFormat: request.audioFormat,
+            title: info.title,
+            isPlaylist: request.isPlaylist,
+            totalItems: totalItems,
+            clip: request.effectiveClip,
+            progress: DownloadProgressState(partLength: request.effectiveClip?.length),
+            compression: nil
+        ))
         Task { [weak self] in
             await self?.runDownload(request: request, info: info)
         }
@@ -229,11 +287,13 @@ final class DownloadController {
 
     func cancelDownload() {
         downloadProcess?.cancel()
+        compressor?.cancel()
     }
 
     /// Stops any running tools right away (EchoFetch is quitting).
     func stopEverything() {
         downloadProcess?.cancel()
+        compressor?.cancel()
         previewProcess?.cancel()
     }
 
@@ -245,9 +305,13 @@ final class DownloadController {
         let fileManager = FileManager.default
         let destination = Preferences.saveFolder
         let partial = AppSupportDirectory.partialDownloads.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        // A video EchoFetch compresses is downloaded into the partial folder first; only the
+        // compressed copy reaches the save folder.
+        let downloaded = request.compresses ? partial.appendingPathComponent("Downloaded", isDirectory: true) : destination
         do {
             try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
             try fileManager.createDirectory(at: partial, withIntermediateDirectories: true)
+            try fileManager.createDirectory(at: downloaded, withIntermediateDirectories: true)
         } catch {
             job = .failed("EchoFetch couldn't use the download folder: \(error.localizedDescription)")
             return
@@ -256,12 +320,13 @@ final class DownloadController {
 
         let process = ToolProcess(
             executableURL: tools.paths.ytDLP,
-            arguments: DownloadCommand.downloadArguments(for: request, destination: destination, temporaryDirectory: partial, tools: tools.paths)
+            arguments: DownloadCommand.downloadArguments(for: request, destination: downloaded, temporaryDirectory: partial, tools: tools.paths)
         )
         downloadProcess = process
         let log = DownloadEventLog()
+        let result: ToolProcessResult
         do {
-            let result = try await process.run { line in
+            result = try await process.run { line in
                 guard let event = DownloadEventParser.parse(line) else { return }
                 log.record(event)
                 Task { @MainActor [weak self] in
@@ -269,29 +334,132 @@ final class DownloadController {
                 }
             }
             downloadProcess = nil
-            finish(result: result, files: log.files, request: request, info: info)
         } catch {
             downloadProcess = nil
             job = .failed(error.localizedDescription)
+            return
         }
-    }
 
-    private func apply(_ event: DownloadEvent) {
-        guard case .running(var current) = job else { return }
-        current.progress.apply(event)
-        job = .running(current)
-    }
-
-    private func finish(result: ToolProcessResult, files: [String], request: DownloadRequest, info: MediaInfo) {
         if result.wasCancelled {
             job = .cancelled
             return
         }
-        guard let location = DownloadOutcome.savedLocation(files: files, isPlaylist: request.isPlaylist) else {
+        let files = log.files
+        guard !files.isEmpty else {
             job = .failed(DownloadErrorExplainer.explain(errorLines: result.standardError, exitCode: result.exitCode))
             return
         }
-        let failedCount = request.isPlaylist ? DownloadOutcome.failedItemCount(in: result.standardError) : 0
+        let failedDownloads = request.isPlaylist ? DownloadOutcome.failedItemCount(in: result.standardError) : 0
+        let downloadProblem = failedDownloads > 0 ? DownloadErrorExplainer.explain(errorLines: result.standardError, exitCode: result.exitCode) : nil
+
+        guard request.compresses else {
+            finish(files: files, originalBytes: nil, failedCount: failedDownloads, problem: downloadProblem, request: request, info: info)
+            return
+        }
+        await compress(
+            files: files,
+            from: downloaded,
+            into: destination,
+            work: partial.appendingPathComponent("Compressed", isDirectory: true),
+            failedDownloads: failedDownloads,
+            downloadProblem: downloadProblem,
+            request: request,
+            info: info
+        )
+    }
+
+    /// Compresses each downloaded video into the save folder, keeping the folders yt-dlp made
+    /// (a playlist's folder). A video that can't be compressed is counted like a failed download.
+    private func compress(
+        files: [String],
+        from downloaded: URL,
+        into destination: URL,
+        work: URL,
+        failedDownloads: Int,
+        downloadProblem: String?,
+        request: DownloadRequest,
+        info: MediaInfo
+    ) async {
+        let fileManager = FileManager.default
+        let compressor = VideoCompressor(tools: tools.paths)
+        self.compressor = compressor
+        defer { self.compressor = nil }
+
+        var saved: [String] = []
+        var originalBytes: Int64 = 0
+        var failedCompressions = 0
+        var compressionProblem: String?
+        for (index, file) in files.enumerated() {
+            updateCompression(Compression(quality: request.videoQuality, index: index + 1, count: files.count, fraction: nil))
+            let input = URL(fileURLWithPath: file)
+            let relative = (FileNames.relativePath(of: input, inside: downloaded) as NSString).deletingPathExtension + ".mp4"
+            let output = work.appendingPathComponent(relative, isDirectory: false)
+            let step = index + 1
+            do {
+                try fileManager.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
+                let result = try await compressor.compress(input: input, output: output, quality: request.videoQuality) { fraction in
+                    Task { @MainActor [weak self] in
+                        self?.updateCompressionFraction(fraction, step: step)
+                    }
+                }
+                guard let result else {
+                    job = .cancelled
+                    return
+                }
+                let target = FileNames.available(destination.appendingPathComponent(relative, isDirectory: false)) {
+                    fileManager.fileExists(atPath: $0)
+                }
+                try fileManager.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try fileManager.moveItem(at: result.output, to: target)
+                saved.append(target.path)
+                originalBytes += result.originalBytes
+            } catch {
+                if compressor.isCancelled {
+                    job = .cancelled
+                    return
+                }
+                failedCompressions += 1
+                compressionProblem = error.localizedDescription
+            }
+            try? fileManager.removeItem(at: input)
+        }
+
+        guard !saved.isEmpty else {
+            job = .failed(compressionProblem ?? CompressionError.failed("").localizedDescription)
+            return
+        }
+        let failedCount = failedDownloads + failedCompressions
+        finish(
+            files: saved,
+            originalBytes: originalBytes,
+            failedCount: failedCount,
+            problem: compressionProblem ?? downloadProblem,
+            request: request,
+            info: info
+        )
+    }
+
+    private func apply(_ event: DownloadEvent) {
+        guard case .running(var current) = job, current.compression == nil else { return }
+        current.progress.apply(event)
+        job = .running(current)
+    }
+
+    private func updateCompression(_ compression: Compression) {
+        guard case .running(var current) = job else { return }
+        current.compression = compression
+        job = .running(current)
+    }
+
+    private func updateCompressionFraction(_ fraction: Double, step: Int) {
+        guard case .running(var current) = job, var compression = current.compression, compression.index == step else { return }
+        compression.fraction = fraction
+        current.compression = compression
+        job = .running(current)
+    }
+
+    private func finish(files: [String], originalBytes: Int64?, failedCount: Int, problem: String?, request: DownloadRequest, info: MediaInfo) {
+        guard let location = DownloadOutcome.savedLocation(files: files, isPlaylist: request.isPlaylist) else { return }
         let uploader: String?
         let thumbnail: URL?
         let totalItems: Int
@@ -316,7 +484,10 @@ final class DownloadController {
             isFolder: location.isFolder,
             itemCount: files.count,
             byteCount: files.reduce(Int64(0)) { $0 + Self.fileSize($1) },
-            createdAt: Date()
+            createdAt: Date(),
+            clip: request.effectiveClip,
+            videoQuality: request.compresses ? request.videoQuality.rawValue : nil,
+            originalByteCount: originalBytes
         )
         history.add(record)
         job = .finished(Finished(
@@ -324,7 +495,7 @@ final class DownloadController {
             savedCount: files.count,
             totalItems: totalItems,
             failedCount: failedCount,
-            problem: failedCount > 0 ? DownloadErrorExplainer.explain(errorLines: result.standardError, exitCode: result.exitCode) : nil
+            problem: failedCount > 0 ? problem : nil
         ))
     }
 

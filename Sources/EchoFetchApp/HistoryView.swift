@@ -130,7 +130,9 @@ private struct HistoryRow: View {
             parts.append(record.itemCount == 1 ? "1 file" : "\(record.itemCount) files")
         }
         parts.append(record.kind == .video ? "Video" : "Audio")
+        if let clip = record.clip { parts.append("Part \(clip.displayText)") }
         parts.append(record.fileExtension.uppercased())
+        if let quality = record.compression { parts.append(quality == .x265 ? "x265" : "Apple HEVC") }
         parts.append(DisplayFormat.bytes(record.byteCount))
         parts.append(record.createdAt.formatted(date: .abbreviated, time: .shortened))
         return parts.joined(separator: " · ")

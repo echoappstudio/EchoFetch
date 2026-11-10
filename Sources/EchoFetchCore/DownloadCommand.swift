@@ -34,13 +34,37 @@ public struct DownloadRequest: Equatable, Sendable {
     public var isPlaylist: Bool
     /// True on Macs that decode AV1 in hardware (M3 and later), where QuickTime plays it.
     public var allowsAV1: Bool
+    /// Only this part of a single video. Ignored for playlists.
+    public var clip: ClipRange?
+    /// For videos: the site's own video, or a compressed copy made after downloading.
+    public var videoQuality: VideoQuality
 
-    public init(link: String, kind: DownloadKind, audioFormat: AudioFormat, isPlaylist: Bool, allowsAV1: Bool) {
+    public init(
+        link: String,
+        kind: DownloadKind,
+        audioFormat: AudioFormat,
+        isPlaylist: Bool,
+        allowsAV1: Bool,
+        clip: ClipRange? = nil,
+        videoQuality: VideoQuality = .original
+    ) {
         self.link = link
         self.kind = kind
         self.audioFormat = audioFormat
         self.isPlaylist = isPlaylist
         self.allowsAV1 = allowsAV1
+        self.clip = clip
+        self.videoQuality = videoQuality
+    }
+
+    /// The part to download, for a single video only.
+    public var effectiveClip: ClipRange? {
+        isPlaylist ? nil : clip
+    }
+
+    /// True when EchoFetch compresses the video after yt-dlp has downloaded it.
+    public var compresses: Bool {
+        kind == .video && videoQuality.isCompressed
     }
 }
 
@@ -84,13 +108,41 @@ public enum DownloadCommand {
             "--no-mtime",
             "--paths", "home:" + destination.path,
             "--paths", "temp:" + temporaryDirectory.path,
-            "--output", request.isPlaylist ? playlistOutputTemplate : singleOutputTemplate
+            "--output", outputTemplate(for: request)
         ]
         arguments += request.isPlaylist ? ["--yes-playlist", "--ignore-errors"] : ["--no-playlist"]
-        arguments += formatArguments(kind: request.kind, audioFormat: request.audioFormat, allowsAV1: request.allowsAV1)
+        if let clip = request.effectiveClip {
+            // yt-dlp hands a part to ffmpeg, which reads only that stretch of the video. Its
+            // progress lines ("out_time_us=…") come out on standard output.
+            arguments += [
+                "--download-sections", clip.sectionArgument,
+                "--downloader-args", "ffmpeg:" + clipProgressArguments
+            ]
+        }
+        if request.compresses {
+            arguments += ["--format", compressibleVideoSelector, "--merge-output-format", "mp4"]
+        } else {
+            arguments += formatArguments(kind: request.kind, audioFormat: request.audioFormat, allowsAV1: request.allowsAV1)
+        }
         arguments += ["--", request.link]
         return arguments
     }
+
+    static let clipProgressArguments = "-progress pipe:1 -nostats"
+
+    /// "%(title).180B.%(ext)s", with "(part 1.30-2.45)" after the title for a part.
+    public static func outputTemplate(for request: DownloadRequest) -> String {
+        if request.isPlaylist { return playlistOutputTemplate }
+        guard let clip = request.effectiveClip else { return singleOutputTemplate }
+        return "%(title).160B (\(clip.fileLabel)).%(ext)s"
+    }
+
+    /// For videos EchoFetch compresses: the best picture in any codec ffmpeg decodes quickly, since
+    /// the result is re-encoded anyway. AV1 is skipped where there's a choice (no fast AV1 decoder in
+    /// the bundled ffmpeg). AAC sound is preferred so it can be copied as it is. Saved as MP4, which
+    /// keeps a part's exact start.
+    public static let compressibleVideoSelector =
+        "bv*[vcodec!^=?av01]+ba[ext=m4a]/bv*[vcodec!^=?av01]+ba/b[vcodec!^=?av01]/bv*+ba/b"
 
     /// Updates yt-dlp in place from its official GitHub releases (checksum-verified by yt-dlp).
     public static func updateArguments() -> [String] {

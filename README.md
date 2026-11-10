@@ -20,6 +20,8 @@
 - Copy a YouTube (or other) link anywhere, switch to EchoFetch, and it's filled in and looked up for you, with the title, thumbnail and length.
 - **Download Video** saves an MP4 in the best quality QuickTime plays on your Mac: up to 4K and 8K on M3 and later.
 - **Download Audio** saves M4A (YouTube's original audio, not re-encoded) or MP3.
+- **Choose Part…** opens a player for the video: drag the start and end, or type them, and EchoFetch downloads only that part. Works for video and audio.
+- **Video quality:** Original, Smaller (Apple HEVC, made by your Mac's video encoder) or Smallest (x265). The compressed choices download the best quality and keep only an HEVC copy that QuickTime plays.
 - Download whole playlists into their own folder. Videos that can't be downloaded are skipped.
 - History of everything you've downloaded, with Show in Finder.
 - The download engine ([yt-dlp](https://github.com/yt-dlp/yt-dlp)) updates itself once a day, so YouTube changes are picked up without a new EchoFetch release.
@@ -51,7 +53,7 @@ After that, EchoFetch updates itself: it checks for a new version when it starts
 EchoFetch is a SwiftUI app that runs the command-line tools it downloads on first launch. There's no server and no API:
 
 - **yt-dlp** finds and downloads the media. It lives in `~/Library/Application Support/EchoFetch/Tools`, where it can update itself (checksum-verified by yt-dlp).
-- **ffmpeg** and **ffprobe** join video and audio into one MP4 and convert audio to MP3.
+- **ffmpeg** and **ffprobe** join video and audio into one MP4, download parts of a video, compress video to HEVC (Apple's encoder or x265) and convert audio to MP3.
 - **Deno** runs the JavaScript YouTube requires.
 - **[Sparkle](https://sparkle-project.org)** installs new versions of EchoFetch itself. Each update is signed, and EchoFetch refuses anything that isn't signed by its own key.
 

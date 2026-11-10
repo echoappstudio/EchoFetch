@@ -33,6 +33,8 @@ public enum DownloadEvent: Equatable, Sendable {
     case item(index: Int?, count: Int?, title: String)
     /// A finished file, at its final location.
     case file(String)
+    /// How far ffmpeg has got, in seconds, while it downloads a part.
+    case partTime(Double)
 }
 
 /// Reads the marked lines that `DownloadCommand.downloadArguments` asks yt-dlp to print.
@@ -59,6 +61,9 @@ public enum DownloadEventParser {
             guard fields.count == 3 else { return nil }
             let title = fields[2] == "NA" ? "" : fields[2]
             return .item(index: Int(fields[0]), count: Int(fields[1]), title: title)
+        }
+        if let seconds = FFmpegProgress.seconds(fromLine: line) {
+            return .partTime(seconds)
         }
         if line.hasPrefix(DownloadCommand.fileMarker) {
             let path = String(line.dropFirst(DownloadCommand.fileMarker.count))
@@ -93,8 +98,12 @@ public struct DownloadProgressState: Equatable, Sendable {
     public var itemCount: Int?
     public var itemTitle: String?
     public var savedFiles: [String] = []
+    /// The length of the part being downloaded, which ffmpeg's progress is measured against.
+    public var partLength: Double?
 
-    public init() {}
+    public init(partLength: Double? = nil) {
+        self.partLength = partLength
+    }
 
     public mutating func apply(_ event: DownloadEvent) {
         switch event {
@@ -123,6 +132,12 @@ public struct DownloadProgressState: Equatable, Sendable {
             default:
                 break
             }
+        case .partTime(let seconds):
+            guard phase != .finishing else { return }
+            phase = .downloading
+            fraction = FFmpegProgress.fraction(seconds: seconds, of: partLength)
+            speed = nil
+            eta = nil
         case .file(let path):
             if !savedFiles.contains(path) { savedFiles.append(path) }
             phase = .finishing
