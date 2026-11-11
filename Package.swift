@@ -21,6 +21,10 @@ let package = Package(
                 .product(name: "Sparkle", package: "Sparkle")
             ],
             linkerSettings: [
+                // SwiftUI's VideoPlayer (Choose Part) needs AVKit loaded, but no code here calls
+                // AVKit directly, so the linker drops the automatic link and the window crashes
+                // (0.4.0). Name it so it always loads; package-app.sh checks it is there.
+                .linkedFramework("AVKit"),
                 // The packaged app keeps Sparkle.framework in Contents/Frameworks.
                 .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])
             ]
