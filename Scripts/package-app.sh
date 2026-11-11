@@ -39,6 +39,8 @@ test -x "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate
 test -x "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater"
 otool -L "$APP_BUNDLE/Contents/MacOS/EchoFetch" | grep -F '@rpath/Sparkle.framework/Versions/B/Sparkle'
 otool -l "$APP_BUNDLE/Contents/MacOS/EchoFetch" | grep -F 'path @executable_path/../Frameworks'
+# The Choose Part player crashes the app if AVKit isn't loaded (0.4.0).
+otool -L "$APP_BUNDLE/Contents/MacOS/EchoFetch" | grep -F '/System/Library/Frameworks/AVKit.framework/'
 grep -F 'Sparkle 2.10.0' "$APP_BUNDLE/Contents/Resources/Acknowledgements.txt"
 
 # The tools are not inside the app: they belong to other projects and aren't signed by us. The
@@ -75,8 +77,8 @@ test -s "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 /usr/libexec/PlistBuddy -c 'Print :SUFeedURL' "$APP_BUNDLE/Contents/Info.plist" | grep -E '^https://'
 /usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$APP_BUNDLE/Contents/Info.plist" | grep -E '^[A-Za-z0-9+/]{43}=$'
 plutil -lint "$APP_BUNDLE/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_BUNDLE/Contents/Info.plist" | grep -Fx '0.4.0'
-/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_BUNDLE/Contents/Info.plist" | grep -Fx '7'
+/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_BUNDLE/Contents/Info.plist" | grep -Fx '0.4.1'
+/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_BUNDLE/Contents/Info.plist" | grep -Fx '8'
 
 # Signing is the last change to the app; everything after only zips, checks and hashes it.
 bash Scripts/sign-app.sh "$APP_BUNDLE"
@@ -100,8 +102,8 @@ test -L "$EXTRACTED_APP/Contents/Frameworks/Sparkle.framework/Versions/Current"
 /usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$EXTRACTED_APP/Contents/Info.plist" | grep -Fx 'EchoFetch'
 /usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$EXTRACTED_APP/Contents/Info.plist" | grep -Fx 'EchoFetch'
 plutil -lint "$EXTRACTED_APP/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$EXTRACTED_APP/Contents/Info.plist" | grep -Fx '0.4.0'
-/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$EXTRACTED_APP/Contents/Info.plist" | grep -Fx '7'
+/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$EXTRACTED_APP/Contents/Info.plist" | grep -Fx '0.4.1'
+/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$EXTRACTED_APP/Contents/Info.plist" | grep -Fx '8'
 codesign --verify --deep --strict "$EXTRACTED_APP"
 test -s "$EXTRACTED_APP/Contents/Resources/Tools/manifest.json"
 test ! -e "$EXTRACTED_APP/Contents/Resources/Tools/yt-dlp.zip"
